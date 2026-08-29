@@ -441,7 +441,7 @@ python -m src.cli.main gui
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/<your-name>/cad-knowledge-base.git
+git clone https://github.com/hufanrong/cad-knowledge-base.git
 cd cad-knowledge-base
 
 # 2. 一键安装（自动创建虚拟环境 + 安装依赖 + 生成 .env）
