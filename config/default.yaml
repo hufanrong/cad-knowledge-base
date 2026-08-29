@@ -1,0 +1,77 @@
+# CAD Knowledge Base Configuration
+# This file is loaded by src/core/config.py
+# 2026-08-18: 资料库迁移至 WorkBuddy 体系 D:/WorkBuddy/work/data/knowledge_base
+
+# Database
+database:
+  type: sqlite
+  path: D:/WorkBuddy/work/data/knowledge_base/database/cadkb.db
+
+# Knowledge Base storage
+storage:
+  root: D:/WorkBuddy/work/data/knowledge_base
+  # OriginalFiles 层：原始文件副本（按类型归档，SHA256 去重）
+  raw_dir: D:/WorkBuddy/work/data/knowledge_base/OriginalFiles
+  # ParsedData 层：解析结果（JSON/MD/TXT）
+  parsed_dir: D:/WorkBuddy/work/data/knowledge_base/ParsedData
+  normalized_dir: D:/WorkBuddy/work/data/knowledge_base/ParsedData/normalized
+  metadata_dir: D:/WorkBuddy/work/data/knowledge_base/ParsedData/metadata
+  # 预览
+  thumbnails_dir: D:/WorkBuddy/work/data/knowledge_base/Preview
+  # 向量库（VectorDB）
+  embeddings_dir: D:/WorkBuddy/work/data/knowledge_base/VectorDB
+  # 搜索索引
+  indexes_dir: D:/WorkBuddy/work/data/knowledge_base/Index
+  # 日志
+  logs_dir: D:/WorkBuddy/work/data/knowledge_base/Logs
+  # 临时目录
+  temp_dir: D:/WorkBuddy/work/data/knowledge_base/Temp
+
+# ODA File Converter
+oda:
+  # Path to ODAFileConverter.exe (leave empty to auto-detect)
+  exe_path: "D:\\ODA\\ODAFileConverter\\ODAFileConverter.exe"
+  # Default output DXF version for DWG conversion
+  output_version: ACAD2018
+  # Enable audit during conversion
+  audit: true
+
+# Parser settings
+parser:
+  # Default parser for DXF files
+  dxf_parser: ezdxf
+  # MTEXT: strip formatting codes
+  strip_mtext_codes: true
+  # Save raw MTEXT content alongside cleaned text
+  save_raw_mtext: true
+  # Maximum entities to parse (0 = unlimited)
+  max_entities: 0
+
+# Quality check
+quality:
+  # Minimum acceptable data completeness (0-1)
+  min_completeness: 0.5
+  # Enable coordinate validation
+  check_coordinates: true
+  # Enable unit detection
+  check_units: true
+
+# Logging
+logging:
+  level: INFO
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+  date_format: "%Y-%m-%d %H:%M:%S"
+  file_enabled: true
+
+# LLM (Phase 7) — OpenAI-compatible API
+# Leave api_key empty to run in "evidence-only" mode (no generation).
+llm:
+  # API base URL (OpenAI-compatible). Examples:
+  #   https://api.openai.com/v1
+  #   https://dashscope.aliyuncs.com/compatible-mode/v1  (阿里云百炼)
+  base_url: "https://api.openai.com/v1"
+  api_key: ""
+  model: "gpt-4o-mini"
+  # Max tokens for generated answer
+  max_tokens: 800
+  temperature: 0.2

@@ -1,0 +1,41 @@
+# ============================================================
+# Docker 构建上下文排除清单（与 .gitignore 语义一致）
+# ============================================================
+.git
+.github
+.gitignore
+.dockerignore
+
+# 数据与运行产物（绝不允许进入镜像）
+KnowledgeBase/
+logs/
+*.db
+*.sqlite
+*.sqlite3
+
+# 环境与密钥
+.env
+*.env
+private/
+
+# Python 缓存与虚拟环境
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# 文档（镜像内不需要）
+tests/
+docs/

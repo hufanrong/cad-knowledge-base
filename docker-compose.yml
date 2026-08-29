@@ -1,0 +1,39 @@
+# ============================================================
+# CAD Knowledge Base - Docker Compose (API + GUI)
+# 用法：docker compose up -d --build
+# 数据持久化在命名卷 kb_data，容器重建不丢数据
+# ============================================================
+services:
+  api:
+    build: .
+    image: cad-knowledge-base:latest
+    container_name: cadkb-api
+    ports:
+      - "8000:8000"
+    environment:
+      - CADKB_DB_PATH=/app/KnowledgeBase/database/cadkb.db
+      - CADKB_KB_ROOT=/app/KnowledgeBase
+      - CADKB_LOG_DIR=/app/KnowledgeBase/logs
+      - CADKB_LOG_LEVEL=INFO
+    volumes:
+      - kb_data:/app/KnowledgeBase
+    command: python -m src.cli.main serve
+
+  gui:
+    image: cad-knowledge-base:latest
+    container_name: cadkb-gui
+    depends_on:
+      - api
+    ports:
+      - "8501:8501"
+    environment:
+      - CADKB_DB_PATH=/app/KnowledgeBase/database/cadkb.db
+      - CADKB_KB_ROOT=/app/KnowledgeBase
+      - CADKB_LOG_DIR=/app/KnowledgeBase/logs
+      - CADKB_LOG_LEVEL=INFO
+    volumes:
+      - kb_data:/app/KnowledgeBase
+    command: python -m src.cli.main gui
+
+volumes:
+  kb_data:
