@@ -57,7 +57,14 @@ RECYCLE_DIR = Path(
 )
 
 # 子目录隔离：这些目录不参与扫描
-SKIP_DIRS = {"_已处理", "_失败", "_待处理"}
+# （2026-08-31 新增 _导入记录：季度导入记录表常住入口，不允许被当文件导入/归档）
+SKIP_DIRS = {"_已处理", "_失败", "_待处理", "_导入记录"}
+
+# 导入记录表（2026-08-31 新增，老板定案）：
+#   按季度一个文件，常住入口目录 _导入记录/ 下，不中转、不删除。
+#   记录字段：文件名称 / 类型 / 导入结果 / 大小 / 导入时间 / 来源路径
+RECORD_DIR_NAME = "_导入记录"
+RECORD_FILE_PREFIX = "资料库导入记录"
 
 # 文件稳定判定：连续两次扫描 size/mtime 一致才算写完
 STABLE_SECONDS = 3.0
@@ -301,6 +308,80 @@ def _move_file(p: Path, target_dir: Path):
         logger.error(f"归档失败(不再重试，文件留原位) {p.name}: {e}")
 
 
+def refresh_quarter_record():
+    """刷新季度导入记录表（全量从库查询本季度导入记录，写入 入口/_导入记录/）。
+
+    一个季度一个文件（如 资料库导入记录_2026Q3.xlsx），常住入口目录，不中转不删除。
+    字段：文件名称 / 类型 / 导入结果 / 大小 / 导入时间 / 来源路径。
+    幂等：每次整表重写（数据来自 cadkb.db，保证准确无重复）。
+    """
+    try:
+        from datetime import datetime
+
+        from openpyxl import Workbook, load_workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+
+        now = datetime.now()
+        q = (now.month - 1) // 3 + 1
+        fname = f"{RECORD_FILE_PREFIX}_{now.year}Q{q}.xlsx"
+        fpath = ENTRY / RECORD_DIR_NAME / fname
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+
+        import sqlite3
+
+        con = sqlite3.connect(get_config().db_path)
+        con.text_factory = lambda b: b.decode("utf-8", "replace")
+        qs = f"{now.year}-{q * 3 - 2:02d}-01"  # 本季度首日
+        rows = list(
+            con.execute(
+                "select original_name, file_type, file_size, parse_status, "
+                "import_time, original_path from files where import_time >= ? "
+                "order by import_time desc",
+                (qs,),
+            )
+        )
+        con.close()
+
+        headers = ["序号", "文件名称", "类型", "导入结果", "大小(字节)", "导入时间", "来源路径"]
+        if fpath.exists():
+            wb = load_workbook(fpath)
+            ws = wb.active
+            ws.delete_rows(2, ws.max_row - 1)  # 保留表头，整表重写
+        else:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "导入记录"
+            ws.append(headers)
+            head_fill = PatternFill("solid", fgColor="305496")
+            for i in range(1, len(headers) + 1):
+                c = ws.cell(row=1, column=i)
+                c.font = Font(bold=True, color="FFFFFF", size=11)
+                c.fill = head_fill
+                c.alignment = Alignment(horizontal="center", vertical="center")
+            ws.freeze_panes = "A2"
+            for i, w in enumerate([6, 52, 10, 12, 14, 20, 70], start=1):
+                ws.column_dimensions[get_column_letter(i)].width = w
+
+        STATUS_CN = {
+            "success": "成功", "completed": "成功", "ok": "成功",
+            "pending": "待处理", "duplicate": "重复跳过",
+            "failed": "失败", "error": "失败", "unsupported": "不支持",
+        }
+        for i, (name, ft, sz, ps, it, path) in enumerate(rows, 1):
+            ws.append(
+                [
+                    i, name or "", (ft or "").upper(),
+                    STATUS_CN.get((ps or "").lower(), ps or ""),
+                    sz or 0, (it or "")[:19], path or "",
+                ]
+            )
+        wb.save(fpath)
+        logger.info(f"季度导入记录已刷新: {fpath.name}（{len(rows)} 条）")
+    except Exception as e:
+        logger.warning(f"季度导入记录刷新失败（不影响导入）: {e}")
+
+
 def rebuild_relations():
     """重建 belongs_to_subsystem 关联（幂等，与新图建立联系）。"""
     try:
@@ -351,6 +432,7 @@ def scan_once() -> int:
             rebuild_relations()
     if n:
         rebuild_relations()
+        refresh_quarter_record()
     return n
 
 
