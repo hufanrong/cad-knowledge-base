@@ -45,6 +45,17 @@ SKIP_EXTENSIONS = {
 # 监听入口目录：可用环境变量 CADKB_ENTRY_DIR 覆盖（每工程独立入口），默认桌面共享入口
 ENTRY = Path(os.environ.get("CADKB_ENTRY_DIR", r"D:\Users\hufanrong\Desktop\资料库入口"))
 
+# 2026-08-31 新增：导入后原始文件直接送入回收中转站（老板定案——原件不再保留，
+# 只保留 cadkb.db 中的解析产物 + 导入记录表）
+#   CADKB_RECYCLE_ORIGINAL=0 可退回旧行为（移入 入口/_已处理、_失败）
+RECYCLE_ORIGINAL = os.environ.get("CADKB_RECYCLE_ORIGINAL", "1") != "0"
+RECYCLE_DIR = Path(
+    os.environ.get(
+        "CADKB_RECYCLE_DIR",
+        r"D:\Users\hufanrong\Desktop\回收中转站",
+    )
+)
+
 # 子目录隔离：这些目录不参与扫描
 SKIP_DIRS = {"_已处理", "_失败", "_待处理"}
 
@@ -259,13 +270,22 @@ def extract_and_import(zip_path: Path, failed_dir: Path, depth: int = 0) -> dict
 
 
 def _move_file(p: Path, target_dir: Path):
-    target_dir.mkdir(parents=True, exist_ok=True)
-    dest = target_dir / p.name
+    """移入目标目录，**保留文件在入口内的相对目录结构**（避免同名冲突，便于事后核对）。"""
+    try:
+        rel = p.relative_to(ENTRY)
+    except ValueError:
+        rel = Path(p.name)
+    dest = target_dir / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
-        dest = target_dir / f"{p.stem}_{int(time.time())}{p.suffix}"
+        dest = dest.parent / f"{p.stem}_{int(time.time())}{p.suffix}"
     try:
         shutil.move(str(p), str(dest))
-        logger.info(f"已归档: {p.name} -> {dest.relative_to(ENTRY)}")
+        try:
+            shown = dest.relative_to(ENTRY)
+        except ValueError:
+            shown = dest
+        logger.info(f"已归档: {p.name} -> {shown}")
     except Exception as e:
         logger.error(f"归档失败 {p.name}: {e}")
 
@@ -287,8 +307,14 @@ def scan_once() -> int:
     if not ENTRY.is_dir():
         return 0
     date_str = datetime.now().strftime("%Y%m%d")
-    done_dir = ENTRY / "_已处理" / date_str
-    failed_dir = ENTRY / "_失败" / date_str
+    if RECYCLE_ORIGINAL:
+        # 原件不再保留：导入后直接送入回收中转站，按 日期/结果 分目录
+        base = RECYCLE_DIR / datetime.now().strftime("%Y-%m-%d")
+        done_dir = base / "已导入"
+        failed_dir = base / "失败"
+    else:
+        done_dir = ENTRY / "_已处理" / date_str
+        failed_dir = ENTRY / "_失败" / date_str
 
     files = []
     for f in ENTRY.rglob("*"):

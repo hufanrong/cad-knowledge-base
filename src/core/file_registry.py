@@ -12,11 +12,18 @@ Principles:
 - The KB keeps its own archive copy (original_path is only a reference).
 - Same SHA256 -> single physical archive copy, multiple source records.
 - Changed content -> new version, old archive + parse kept.
+
+2026-08-31 变更（老板定案）：
+- 新增 CADKB_KEEP_ARCHIVE_COPY 开关，默认 0 —— **不再保留 OriginalFiles 副本**，
+  仅记录理论归档路径，解析产物全部落在 cadkb.db（结构化数据 + 向量）。
+- 置 1 可恢复旧行为（复制副本）。
+- 影响：scripts/build_previews.py 在原件缺失时原本回退读副本，关闭后该功能失效。
 """
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -58,6 +65,11 @@ SOURCE_DIR_MAP = {
     "cad": "CAD", "word": "Word", "excel": "Excel", "pdf": "PDF",
     "project": "Project", "image": "Images", "other": "Other",
 }
+
+# 是否保留 OriginalFiles 物理副本（2026-08-31 新增）
+#   CADKB_KEEP_ARCHIVE_COPY=1 -> 复制副本（旧行为）
+#   默认/其他值            -> 不复制，仅记录理论归档路径
+KEEP_ARCHIVE_COPY = os.environ.get("CADKB_KEEP_ARCHIVE_COPY", "0") == "1"
 
 
 def source_type_for_file(path: str | Path) -> SourceType:
@@ -507,12 +519,23 @@ class FileRegistry:
     # ── internals ────────────────────────────────────────────────────
 
     def _archive_copy(self, path: Path, source_type: str, sha256: str) -> Path | None:
-        """Copy file into OriginalFiles/<SourceType>/<sha256>.<ext>."""
+        """Copy file into OriginalFiles/<SourceType>/<sha256>.<ext>.
+
+        2026-08-31：受 CADKB_KEEP_ARCHIVE_COPY 控制
+          开(=1) -> 复制物理副本（旧行为）
+          关(默认) -> 不复制，仅返回理论路径，供 archive_path 字段记录
+        """
         dir_name = SOURCE_DIR_MAP.get(source_type, source_type)
+        ext = path.suffix.lower() or ".bin"
+        dest = self.archive_root / dir_name / f"{sha256}{ext}"
+
+        if not KEEP_ARCHIVE_COPY:
+            # 副本不再保留：只记路径，不落盘（解析产物仍完整存入 cadkb.db）
+            logger.debug(f"副本已跳过（CADKB_KEEP_ARCHIVE_COPY=0）: {path.name}")
+            return dest
+
         dest_dir = self.archive_root / dir_name
         dest_dir.mkdir(parents=True, exist_ok=True)
-        ext = path.suffix.lower() or ".bin"
-        dest = dest_dir / f"{sha256}{ext}"
         try:
             if dest.exists() and dest.stat().st_size == path.stat().st_size:
                 return dest  # already archived
