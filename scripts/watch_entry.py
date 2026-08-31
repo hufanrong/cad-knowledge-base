@@ -269,8 +269,18 @@ def extract_and_import(zip_path: Path, failed_dir: Path, depth: int = 0) -> dict
     }
 
 
+_MOVE_FAILED: set = set()  # 移动失败过的文件（沙箱拦截等），不再重试，避免每轮重复报错
+
+
 def _move_file(p: Path, target_dir: Path):
-    """移入目标目录，**保留文件在入口内的相对目录结构**（避免同名冲突，便于事后核对）。"""
+    """移入目标目录，**保留文件在入口内的相对目录结构**（避免同名冲突，便于事后核对）。
+
+    2026-08-31：移动失败（如沙箱拦截移动操作）只记录一次，不阻塞、不重试，
+    文件留在原位，由人工统一处理；导入结果不受影响（内容已入库）。
+    """
+    key = str(p)
+    if key in _MOVE_FAILED:
+        return
     try:
         rel = p.relative_to(ENTRY)
     except ValueError:
@@ -287,7 +297,8 @@ def _move_file(p: Path, target_dir: Path):
             shown = dest
         logger.info(f"已归档: {p.name} -> {shown}")
     except Exception as e:
-        logger.error(f"归档失败 {p.name}: {e}")
+        _MOVE_FAILED.add(key)
+        logger.error(f"归档失败(不再重试，文件留原位) {p.name}: {e}")
 
 
 def rebuild_relations():
