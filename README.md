@@ -31,9 +31,27 @@
 | 磁盘空间 | 依赖约 3GB（含 torch CPU 版）；知识库数据另计 |
 | 网络 | 首次安装需联网下载依赖；Embedding 模型首次使用时自动下载 |
 | 可选 | ODA File Converter（DWG 解析）、Ollama 或 LLM API Key（AI 问答） |
+| 可选 | Tesseract OCR 5.x + 中文语言包（扫描件装箱单/签收单识别） |
 
 > ⚠️ **torch 说明**：请务必安装 CPU 版，避免下载数 GB 的 CUDA 依赖：
 > `pip install torch --index-url https://download.pytorch.org/whl/cpu`
+
+### OCR 语言包（仅装箱单 OCR 通道需要）
+
+Tesseract 默认只带英文包，处理中文扫描件需补 `chi_sim`：
+
+```bash
+# 1) 安装 Tesseract（Windows 安装包 / apt / brew 均可）
+#    Windows 默认路径 C:\Program Files\Tesseract-OCR\tesseract.exe
+
+# 2) 下载中文包到项目内 data/tessdata/（不污染系统目录）
+mkdir -p data/tessdata
+curl -L -o data/tessdata/chi_sim.traineddata \
+  https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/chi_sim.traineddata
+```
+
+脚本会自动读取项目内 `data/tessdata`，也可用环境变量覆盖：
+`TESSDATA_PREFIX`（语言包目录）、`TESSERACT_CMD`（可执行文件路径）。
 
 ### 依赖锁定策略
 
@@ -416,6 +434,64 @@ python -m src.cli.main gui
 
 导入后自动执行：解析 → 语义分析（图框/标题栏/设备/管道）→ 空间关系 → 向量索引。
 重复文件自动跳过（`--force` 强制覆盖）。
+
+## 装箱单与箱号映射
+
+设备到场收货最常踩的坑：**同一只箱子在不同资料里有两套编号**——厂家装箱清单写
+`2#`，物流单证/重尺表写 `9-2`。这套脚本把装箱资料结构化，并建立两套编号的映射。
+
+### 数据表
+
+| 表 | 内容 |
+|----|------|
+| `packing_boxes` | 箱级记录：箱号、箱名、长宽高、体积、净重、毛重、箱内项数、供应商、来源文件、置信度 |
+| `packing_box_items` | 箱内物品明细：品名、数量、单位、规格 |
+| `packing_ocr_raw` | OCR 原文留痕（按页），用于人工复核与二次提取，避免重复 OCR |
+| `packing_box_aliases` | 厂家箱号 ↔ 物流单证箱号 映射，含匹配方式、置信分、是否人工确认、依据 |
+
+### 用法
+
+```bash
+# 1) 解析装箱单（docx / xls / xlsx / HTML伪xls / PDF 文字层）
+python scripts/parse_vendor_packing.py --dry-run          # 先看结果
+python scripts/parse_vendor_packing.py --yes              # 写库
+python scripts/parse_vendor_packing.py --yes --reset      # 全量重建
+
+# 2) 含扫描件（慢，扫描 PDF 与图片走 Tesseract OCR）
+python scripts/parse_vendor_packing.py --yes --reset --ocr
+
+# 3) 增量修复某个目录（不重建全库）
+python scripts/parse_vendor_packing.py --yes --ocr --only "大一重工"
+
+# 4) 建立箱号映射
+python scripts/build_box_aliases.py --dry-run
+python scripts/build_box_aliases.py --yes --xlsx "箱号映射表.xlsx"
+
+# 5) 核查与反查
+python scripts/verify_packing.py
+python scripts/verify_packing.py --lookup "9-2"
+```
+
+### OCR 通道的取舍（实测结论）
+
+| 字段 | OCR 可靠性 | 处理方式 |
+|------|-----------|---------|
+| 装箱号（如 `7-7`） | 高 | 写入 `box_no`；并用文件名声明的厂家箱号区间交叉校验 |
+| 尺寸 / 净重 / 毛重 | 低（浅色细字表格易错列） | **不写，留 NULL** |
+| 箱内物品明细 | 低 | **不写**，原文存 `packing_ocr_raw` 供人工核对 |
+
+校验不通过时降级为「只登记文件名给出的厂家箱号」（`NE150-1#`…），并在 `remark`
+说明原因，绝不猜测单证箱号。
+
+### 映射的三种来源
+
+| 方式 | 可信度 | 说明 |
+|------|--------|------|
+| `manual` | 已确认 | 脚本内 `SEED` 逐条附证据（尺寸+名称双证），`verified=1` |
+| `dims` | 自动 | 同厂商跨体系，按三边尺寸 + 箱名相似度打分，须**双向唯一最优**才采纳 |
+| `sequential` | 待确认 | 扫描件文件名给厂家箱号区间、OCR 给单证箱号，升序对应，`verified=0` |
+
+红线：低于阈值一律不写（进「未匹配」清单）；一对多/多对一冲突只报告、不定案。
 
 ## 技术栈
 

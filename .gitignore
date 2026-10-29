@@ -72,3 +72,6 @@ htmlcov/
 
 # Jupyter
 .ipynb_checkpoints
+
+# OCR 语言包（体积大，首次运行 setup 时按 README 下载）
+data/tessdata/*.traineddata
