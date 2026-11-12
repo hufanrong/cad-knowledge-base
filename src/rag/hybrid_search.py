@@ -39,8 +39,13 @@ class HybridSearch:
         query: str,
         top_k: int = 10,
         where: dict | None = None,
+        project_id: str = "",
     ) -> list[dict]:
         """Run hybrid search and return merged, ranked results.
+
+        Args:
+            project_id: 工程隔离（P1）——非空时 FTS/结构化/向量三层都只返回
+                平台级(空/None) + 本工程 资料；空串 = 平台级查询不过滤。
 
         Returns:
             List of dicts:
@@ -56,17 +61,22 @@ class HybridSearch:
         try:
             fts_results = self.search_service.search(
                 query=query, search_type="text", limit=top_k * 3,
+                project_id=project_id,
             )
             fts_results += self.search_service.search(
                 query=query, search_type="attribute", limit=top_k * 3,
+                project_id=project_id,
             )
         except Exception as e:
             logger.warning(f"FTS 检索失败: {e}")
 
-        # 2. Vector search
+        # 2. Vector search（向量层工程过滤：平台级+本工程两次等值查询合并，
+        #    规避 Chroma $in 空串 bug）
         vector_results: list[dict] = []
         try:
-            vector_results = self.vector_index.query(query, top_k=top_k * 3, where=where)
+            vector_results = self.vector_index.query_project(
+                query, top_k=top_k * 3, project_id=project_id, where=where,
+            )
         except Exception as e:
             logger.warning(f"向量检索失败: {e}")
 
@@ -75,9 +85,11 @@ class HybridSearch:
         try:
             structured_results = self.search_service.search(
                 query=query, search_type="equipment", limit=top_k * 2,
+                project_id=project_id,
             )
             structured_results += self.search_service.search(
                 query=query, search_type="title_field", limit=top_k * 2,
+                project_id=project_id,
             )
         except Exception as e:
             logger.warning(f"结构化检索失败: {e}")
@@ -169,10 +181,11 @@ def hybrid_search(
     query: str,
     top_k: int = 10,
     vector_index: VectorIndex | None = None,
+    project_id: str = "",
 ) -> list[dict]:
     """Convenience wrapper for HybridSearch.search()."""
     hs = HybridSearch(vector_index=vector_index)
     try:
-        return hs.search(query, top_k=top_k)
+        return hs.search(query, top_k=top_k, project_id=project_id)
     finally:
         hs.close()

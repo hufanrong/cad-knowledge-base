@@ -29,13 +29,17 @@ from src.database.models import (
 )
 
 
-def _file_id_for_drawing(drawing_id: str) -> str | None:
+def _file_id_for_drawing(drawing_id: str, project_id: str = "") -> str | None:
     session = get_session()
     try:
-        row = session.execute(
-            text("SELECT file_id FROM files WHERE drawing_id=:did LIMIT 1"),
-            {"did": drawing_id},
-        ).fetchone()
+        sql = "SELECT file_id FROM files WHERE drawing_id=:did"
+        params: dict = {"did": drawing_id}
+        if project_id:
+            sql += (" AND (project_id = :pid OR project_id = '' "
+                    "OR project_id IS NULL)")
+            params["pid"] = project_id
+        sql += " LIMIT 1"
+        row = session.execute(text(sql), params).fetchone()
         return row[0] if row else None
     finally:
         session.close()
@@ -68,20 +72,29 @@ def _elevation_for_drawing(drawing_id: str) -> dict | None:
         session.close()
 
 
-def _packing_for_tag(tag_no: str) -> list[dict]:
-    """通过 relation_candidates.cand_type='equipment_packing' 关联 packing_items。"""
+def _packing_for_tag(tag_no: str, project_id: str = "") -> list[dict]:
+    """通过 relation_candidates.cand_type='equipment_packing' 关联 packing_items。
+
+    工程隔离：packing_items 经 source_file_id 关联 files，只保留
+    平台级(空/None) + 本工程；source_file_id 为空（归属不明）时保守保留。
+    """
     session = get_session()
     try:
-        rows = session.execute(
-            text("""SELECT pi.packing_no, pi.equip_name, pi.vendor, pi.qty,
+        sql = """SELECT pi.packing_no, pi.equip_name, pi.vendor, pi.qty,
                            rc.confidence, rc.status, rc.evidence
                     FROM relation_candidates rc
                     JOIN packing_items pi ON pi.packing_no = rc.target_key
+                    LEFT JOIN files f ON f.file_id = pi.source_file_id
                     WHERE rc.cand_type = 'equipment_packing'
                       AND rc.entity_key = :tag
-                    ORDER BY rc.confidence DESC"""),
-            {"tag": tag_no},
-        ).fetchall()
+                """
+        params: dict = {"tag": tag_no}
+        if project_id:
+            sql += (" AND (f.project_id = :pid OR f.project_id = '' "
+                    "OR f.project_id IS NULL)")
+            params["pid"] = project_id
+        sql += " ORDER BY rc.confidence DESC"
+        rows = session.execute(text(sql), params).fetchall()
         out = []
         for r in rows:
             out.append({
@@ -98,21 +111,28 @@ def _packing_for_tag(tag_no: str) -> list[dict]:
         session.close()
 
 
-def _documents_for_tag(tag_no: str) -> list[dict]:
-    """通过 relation_candidates.cand_type='device_document' 关联 files/document_contents。"""
+def _documents_for_tag(tag_no: str, project_id: str = "") -> list[dict]:
+    """通过 relation_candidates.cand_type='device_document' 关联 files/document_contents。
+
+    工程隔离：files 表只保留 平台级(空/None) + 本工程。
+    """
     session = get_session()
     try:
-        rows = session.execute(
-            text("""SELECT f.file_id, f.original_name, f.file_type,
+        sql = """SELECT f.file_id, f.original_name, f.file_type,
                            dc.title, rc.confidence, rc.status, rc.evidence
                     FROM relation_candidates rc
                     JOIN files f ON f.file_id = rc.target_key
                     LEFT JOIN document_contents dc ON dc.file_id = f.file_id
                     WHERE rc.cand_type = 'device_document'
                       AND rc.entity_key = :tag
-                    ORDER BY rc.confidence DESC"""),
-            {"tag": tag_no},
-        ).fetchall()
+                """
+        params: dict = {"tag": tag_no}
+        if project_id:
+            sql += (" AND (f.project_id = :pid OR f.project_id = '' "
+                    "OR f.project_id IS NULL)")
+            params["pid"] = project_id
+        sql += " ORDER BY rc.confidence DESC"
+        rows = session.execute(text(sql), params).fetchall()
         out = []
         for r in rows:
             out.append({
@@ -129,8 +149,15 @@ def _documents_for_tag(tag_no: str) -> list[dict]:
         session.close()
 
 
-def get_device_profile(tag_no: str) -> dict[str, Any]:
-    """按位号返回完整设备档案。"""
+def get_device_profile(tag_no: str, project_id: str = "") -> dict[str, Any]:
+    """按位号返回完整设备档案。
+
+    Args:
+        tag_no: 设备位号。
+        project_id: 工程隔离（P1）——非空时出现位置/箱单/业务文档只保留
+            平台级(空/None) + 本工程；设备主数据本身跨工程保留。
+            空串 = 平台级查询，不过滤。
+    """
     session = get_session()
     try:
         # 1. 主记录
@@ -155,6 +182,22 @@ def get_device_profile(tag_no: str) -> dict[str, Any]:
         )
 
         drawing_ids = list({o.drawing_id for o in occs})
+
+        # 工程隔离：只保留 平台级 + 本工程 图纸的出现位置
+        if project_id and drawing_ids:
+            allowed = set()
+            for did in drawing_ids:
+                row = session.execute(
+                    text("""SELECT 1 FROM files WHERE drawing_id=:did
+                            AND (project_id=:pid OR project_id=''
+                                 OR project_id IS NULL) LIMIT 1"""),
+                    {"did": did, "pid": project_id},
+                ).fetchone()
+                if row:
+                    allowed.add(did)
+            occs = [o for o in occs if o.drawing_id in allowed]
+
+        drawing_ids = list({o.drawing_id for o in occs})
         drawing_names = {
             d.drawing_id: d.file_name
             for d in session.query(DrawingModel.drawing_id, DrawingModel.file_name)
@@ -165,7 +208,7 @@ def get_device_profile(tag_no: str) -> dict[str, Any]:
         occurrences = []
         for o in occs:
             drawing_id = o.drawing_id
-            file_id = _file_id_for_drawing(drawing_id)
+            file_id = _file_id_for_drawing(drawing_id, project_id)
             occurrences.append({
                 "drawing_id": drawing_id,
                 "file_id": file_id,
@@ -179,8 +222,8 @@ def get_device_profile(tag_no: str) -> dict[str, Any]:
             })
 
         # 3. 箱单与文档
-        packings = _packing_for_tag(dm.tag_no)
-        documents = _documents_for_tag(dm.tag_no)
+        packings = _packing_for_tag(dm.tag_no, project_id)
+        documents = _documents_for_tag(dm.tag_no, project_id)
         pending_count = sum(1 for p in packings + documents if p.get("status") == "pending")
 
         return {
@@ -191,8 +234,8 @@ def get_device_profile(tag_no: str) -> dict[str, Any]:
             "name": dm.name,
             "category": dm.category,
             "subsystem_no": dm.subsystem_no,
-            "drawing_count": dm.drawing_count,
-            "occurrence_count": dm.occurrence_count,
+            "drawing_count": len(drawing_ids),
+            "occurrence_count": len(occs),
             "confidence": dm.confidence,
             "occurrences": occurrences,
             "packing_lists": packings,

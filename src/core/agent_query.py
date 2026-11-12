@@ -128,14 +128,15 @@ def parse_question(query: str) -> ParsedQuestion:
 # Retrieval helpers
 # ---------------------------------------------------------------------------
 
-def _get_drawings_for_subsystem(subsystem: str, limit: int = 20) -> list[dict[str, Any]]:
+def _get_drawings_for_subsystem(subsystem: str, limit: int = 20,
+                                project_id: str = "") -> list[dict[str, Any]]:
     """Subsystem codes are stored in file_relations.relation_type='belongs_to_subsystem'.
     file_a is a file_id; we join through files.drawing_id to drawings.
+    工程隔离：files 表只保留 平台级(空/None) + 本工程。
     """
     session = get_session()
     try:
-        rows = session.execute(
-            text("""
+        sql = """
                 SELECT d.drawing_id, d.file_name, fr.file_b AS subsystem_name,
                        f.file_id, f.original_path
                 FROM file_relations fr
@@ -143,11 +144,14 @@ def _get_drawings_for_subsystem(subsystem: str, limit: int = 20) -> list[dict[st
                 JOIN drawings d ON d.drawing_id = f.drawing_id
                 WHERE fr.relation_type = 'belongs_to_subsystem'
                   AND fr.file_b LIKE :sub
-                ORDER BY d.file_name
-                LIMIT :lim
-            """),
-            {"sub": f"{subsystem}%", "lim": limit},
-        ).fetchall()
+            """
+        params: dict = {"sub": f"{subsystem}%", "lim": limit}
+        if project_id:
+            sql += (" AND (f.project_id = :pid OR f.project_id = '' "
+                    "OR f.project_id IS NULL)")
+            params["pid"] = project_id
+        sql += " ORDER BY d.file_name LIMIT :lim"
+        rows = session.execute(text(sql), params).fetchall()
         out = []
         for r in rows:
             out.append({
@@ -164,20 +168,23 @@ def _get_drawings_for_subsystem(subsystem: str, limit: int = 20) -> list[dict[st
         session.close()
 
 
-def _get_packing_by_keyword(keyword: str, limit: int = 10) -> list[dict[str, Any]]:
+def _get_packing_by_keyword(keyword: str, limit: int = 10,
+                            project_id: str = "") -> list[dict[str, Any]]:
     session = get_session()
     try:
-        q = f"%{keyword}%"
-        rows = session.execute(
-            text("""
+        sql = """
                 SELECT packing_no, equip_name, vendor, qty, source_file_id
-                FROM packing_items
+                FROM packing_items pi
+                LEFT JOIN files f ON f.file_id = pi.source_file_id
                 WHERE equip_name LIKE :q OR packing_no LIKE :q OR vendor LIKE :q
-                ORDER BY packing_no
-                LIMIT :lim
-            """),
-            {"q": q, "lim": limit},
-        ).fetchall()
+            """
+        params: dict = {"q": f"%{keyword}%", "lim": limit}
+        if project_id:
+            sql += (" AND (f.project_id = :pid OR f.project_id = '' "
+                    "OR f.project_id IS NULL)")
+            params["pid"] = project_id
+        sql += " ORDER BY packing_no LIMIT :lim"
+        rows = session.execute(text(sql), params).fetchall()
         out = []
         for r in rows:
             out.append({
@@ -193,11 +200,11 @@ def _get_packing_by_keyword(keyword: str, limit: int = 10) -> list[dict[str, Any
         session.close()
 
 
-def _get_elevations_for_subsystem(subsystem: str) -> list[dict[str, Any]]:
+def _get_elevations_for_subsystem(subsystem: str,
+                                  project_id: str = "") -> list[dict[str, Any]]:
     session = get_session()
     try:
-        rows = session.execute(
-            text("""
+        sql = """
                 SELECT d.file_name, e.datum_elevation, e.datum_type,
                        e.raw_text, e.confidence, e.verified
                 FROM elevations e
@@ -206,10 +213,14 @@ def _get_elevations_for_subsystem(subsystem: str) -> list[dict[str, Any]]:
                 JOIN file_relations fr ON fr.file_a = f.file_id
                 WHERE fr.relation_type = 'belongs_to_subsystem'
                   AND fr.file_b LIKE :sub
-                ORDER BY e.confidence DESC
-            """),
-            {"sub": f"{subsystem}%"},
-        ).fetchall()
+            """
+        params: dict = {"sub": f"{subsystem}%"}
+        if project_id:
+            sql += (" AND (f.project_id = :pid OR f.project_id = '' "
+                    "OR f.project_id IS NULL)")
+            params["pid"] = project_id
+        sql += " ORDER BY e.confidence DESC"
+        rows = session.execute(text(sql), params).fetchall()
         out = []
         for r in rows:
             out.append({
@@ -230,18 +241,25 @@ def _get_elevations_for_subsystem(subsystem: str) -> list[dict[str, Any]]:
 # Main agent query
 # ---------------------------------------------------------------------------
 
-def agent_query(query: str, top_k: int = 8) -> AgentQueryResult:
-    """Entry point for agent-oriented knowledge base query."""
+def agent_query(query: str, top_k: int = 8, project_id: str = "") -> AgentQueryResult:
+    """Entry point for agent-oriented knowledge base query.
+
+    Args:
+        query: 自然语言问题。
+        top_k: 统一搜索返回条数。
+        project_id: 工程隔离（P1）——非空时设备档案/子系统图纸/统一搜索/
+            箱单/标高只保留 平台级(空/None) + 本工程 资料；空串不过滤。
+    """
     parsed = parse_question(query)
     result = AgentQueryResult(parsed=parsed)
     evidence: list[dict[str, Any]] = []
     gaps: list[str] = []
 
-    logger.info(f"Agent query: {query} | tags={parsed.tags} | subs={parsed.subsystems} | intent={parsed.intent}")
+    logger.info(f"Agent query: {query} | tags={parsed.tags} | subs={parsed.subsystems} | intent={parsed.intent} | project={project_id or '平台'}")
 
     # 1. Device profile by tag
     for tag in parsed.tags:
-        profile = get_device_profile(tag)
+        profile = get_device_profile(tag, project_id=project_id)
         if profile.get("found"):
             evidence.append({
                 "type": "device_profile",
@@ -253,7 +271,7 @@ def agent_query(query: str, top_k: int = 8) -> AgentQueryResult:
 
     # 2. Subsystem drawings
     for sub in parsed.subsystems:
-        drawings = _get_drawings_for_subsystem(sub)
+        drawings = _get_drawings_for_subsystem(sub, project_id=project_id)
         if drawings:
             evidence.append({
                 "type": "subsystem_drawings",
@@ -267,7 +285,7 @@ def agent_query(query: str, top_k: int = 8) -> AgentQueryResult:
     # 3. Unified search for keywords / generic query
     if parsed.intent not in ("drawing",) or not parsed.tags and not parsed.subsystems:
         try:
-            uni = search_all(query, limit=top_k)
+            uni = search_all(query, limit=top_k, project_id=project_id)
             if uni:
                 evidence.append({
                     "type": "unified_search",
@@ -279,7 +297,7 @@ def agent_query(query: str, top_k: int = 8) -> AgentQueryResult:
 
     # 4. Packing / vendor lookup
     for tag in parsed.tags:
-        pk = _get_packing_by_keyword(tag)
+        pk = _get_packing_by_keyword(tag, project_id=project_id)
         if pk:
             evidence.append({
                 "type": "packing_lookup",
@@ -288,7 +306,7 @@ def agent_query(query: str, top_k: int = 8) -> AgentQueryResult:
             })
     if parsed.intent == "vendor" and parsed.keywords:
         for kw in parsed.keywords[:3]:
-            pk = _get_packing_by_keyword(kw)
+            pk = _get_packing_by_keyword(kw, project_id=project_id)
             if pk:
                 evidence.append({
                     "type": "packing_lookup",
@@ -298,7 +316,7 @@ def agent_query(query: str, top_k: int = 8) -> AgentQueryResult:
 
     # 5. Elevations for subsystems
     for sub in parsed.subsystems:
-        elevs = _get_elevations_for_subsystem(sub)
+        elevs = _get_elevations_for_subsystem(sub, project_id=project_id)
         if elevs:
             evidence.append({
                 "type": "elevations",

@@ -28,7 +28,7 @@ def get_engine():
         _engine = create_engine(
             db_url,
             echo=False,
-            connect_args={"check_same_thread": False},
+            connect_args={"check_same_thread": False, "timeout": 300},
         )
         logger.info(f"数据库引擎已创建: {db_path}")
     return _engine

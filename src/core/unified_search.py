@@ -30,6 +30,7 @@ def search_all(
     query: str,
     limit: int = 30,
     source_types: list[str] | None = None,
+    project_id: str = "",
 ) -> list[dict]:
     """Search everything: CAD + documents + file metadata.
 
@@ -37,6 +38,8 @@ def search_all(
         query: Keyword(s) to search.
         limit: Max results.
         source_types: Optional filter (cad/word/excel/pdf/project/image/other).
+        project_id: 工程隔离（P1）——非空时只返回 平台级(空/None) + 本工程 资料；
+            空串 = 平台级查询，不过滤。
 
     Returns:
         List of results: {file_id, file_name, source_type, match_type,
@@ -51,16 +54,16 @@ def search_all(
         if not source_types or any(t in source_types for t in
                                    ("word", "excel", "pdf", "project",
                                     "image", "other")):
-            doc_rows = _fts_documents(session, q, limit)
+            doc_rows = _fts_documents(session, q, limit, project_id)
             results.extend(doc_rows)
 
         # 2. CAD texts FTS
         if not source_types or "cad" in source_types:
-            cad_rows = _fts_cad(session, q, limit)
+            cad_rows = _fts_cad(session, q, limit, project_id)
             results.extend(cad_rows)
 
         # 3. File metadata (filename/tags) — respect source filter
-        meta_rows = _fts_files(session, query, limit, source_types)
+        meta_rows = _fts_files(session, query, limit, source_types, project_id)
         results.extend(meta_rows)
 
         # Dedup by file identity, keep best score first
@@ -188,10 +191,10 @@ def get_project_files(project_id: str, limit: int = 50) -> list[dict]:
 
 # ── internal FTS helpers ─────────────────────────────────────────────
 
-def _fts_documents(session, q: str, limit: int) -> list[dict]:
+def _fts_documents(session, q: str, limit: int,
+                   project_id: str = "") -> list[dict]:
     try:
-        rows = session.execute(
-            text("""
+        sql = """
                 SELECT d.file_id, d.title, d.content, d.source_type,
                        d.source, d.confidence,
                        f.original_name, f.original_path, f.archive_path,
@@ -202,11 +205,14 @@ def _fts_documents(session, q: str, limit: int) -> list[dict]:
                   ON documents_fts.file_id = d.file_id
                 LEFT JOIN files f ON d.file_id = f.file_id
                 WHERE documents_fts MATCH :q
-                ORDER BY score
-                LIMIT :lim
-            """),
-            {"q": q, "lim": limit},
-        )
+            """
+        params: dict = {"q": q, "lim": limit}
+        if project_id:
+            sql += (" AND (f.project_id = :pid OR f.project_id = '' "
+                    "OR f.project_id IS NULL)")
+            params["pid"] = project_id
+        sql += " ORDER BY score LIMIT :lim"
+        rows = session.execute(text(sql), params)
         out = []
         for r in rows:
             snippet = _make_snippet(r.content, q)
@@ -232,22 +238,27 @@ def _fts_documents(session, q: str, limit: int) -> list[dict]:
         return []
 
 
-def _fts_cad(session, q: str, limit: int) -> list[dict]:
+def _fts_cad(session, q: str, limit: int,
+             project_id: str = "") -> list[dict]:
     out = []
     try:
-        rows = session.execute(
-            text("""
+        sql = """
                 SELECT t.text_content, t.drawing_id,
                        d.file_name, d.file_path, d.file_hash
                 FROM texts_fts
                 JOIN texts t ON texts_fts.entity_id = t.entity_id
                 JOIN drawings d ON t.drawing_id = d.drawing_id
                 WHERE texts_fts MATCH :q
-                ORDER BY bm25(texts_fts)
-                LIMIT :lim
-            """),
-            {"q": q, "lim": limit},
-        )
+            """
+        params: dict = {"q": q, "lim": limit}
+        if project_id:
+            sql += (" AND EXISTS (SELECT 1 FROM files fl "
+                    "WHERE fl.drawing_id = d.drawing_id "
+                    "AND (fl.project_id = :pid OR fl.project_id = '' "
+                    "OR fl.project_id IS NULL))")
+            params["pid"] = project_id
+        sql += " ORDER BY bm25(texts_fts) LIMIT :lim"
+        rows = session.execute(text(sql), params)
         for r in rows:
             out.append({
                 "file_id": None,
@@ -264,15 +275,20 @@ def _fts_cad(session, q: str, limit: int) -> list[dict]:
 
     # Drawing filename matches
     try:
-        rows = session.execute(
-            text("""
+        sql = """
                 SELECT d.file_name, d.drawing_id, d.file_path, d.file_hash
                 FROM drawings d
                 WHERE d.file_name LIKE :kw
-                LIMIT :lim
-            """),
-            {"kw": f"%{q}%", "lim": limit},
-        )
+            """
+        params = {"kw": f"%{q}%", "lim": limit}
+        if project_id:
+            sql += (" AND EXISTS (SELECT 1 FROM files fl "
+                    "WHERE fl.drawing_id = d.drawing_id "
+                    "AND (fl.project_id = :pid OR fl.project_id = '' "
+                    "OR fl.project_id IS NULL))")
+            params["pid"] = project_id
+        sql += " LIMIT :lim"
+        rows = session.execute(text(sql), params)
         for r in rows:
             out.append({
                 "file_id": None,
@@ -290,13 +306,21 @@ def _fts_cad(session, q: str, limit: int) -> list[dict]:
 
 
 def _fts_files(session, query: str, limit: int,
-               source_types: list[str] | None = None) -> list[dict]:
+               source_types: list[str] | None = None,
+               project_id: str = "") -> list[dict]:
     """File registry metadata matches (filename/tags/path)."""
     kw = f"%{query}%"
     try:
         q = session.query(FileModel).filter(FileModel.original_name.like(kw))
         if source_types:
             q = q.filter(FileModel.source_type.in_(source_types))
+        if project_id:
+            from sqlalchemy import or_
+            q = q.filter(or_(
+                FileModel.project_id == project_id,
+                FileModel.project_id == "",
+                FileModel.project_id.is_(None),
+            ))
         rows = q.limit(limit).all()
     except Exception as e:
         logger.warning(f"files 搜索失败: {e}")

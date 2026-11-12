@@ -20,7 +20,9 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent
 PYTHON = Path(r"C:\Users\hufanrong\.workbuddy\binaries\python\versions\3.13.12\python.exe")
 LOG_DIR = PROJECT_DIR / "logs"
-API_PORT = 8000
+# 端口规划（2026-08-30 调整）：8000 已被「现场工况记录平台」门户占用（隧道 hfrgcai.icu 指向），
+# CAD-KB API 改 8100，避免 start_local 强杀现场记录服务
+API_PORT = 8100
 GUI_PORT = 8501
 API_URL = f"http://127.0.0.1:{API_PORT}/api/health"
 GUI_URL = f"http://localhost:{GUI_PORT}/_stcore/health"

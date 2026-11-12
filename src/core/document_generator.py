@@ -58,9 +58,9 @@ def _safe(value: Any, default: str = "—") -> str:
     return str(value) if value is not None else default
 
 
-def _get_device_summary(tag_no: str) -> dict[str, Any]:
+def _get_device_summary(tag_no: str, project_id: str = "") -> dict[str, Any]:
     """Fetch a concise device profile for document templates."""
-    profile = get_device_profile(tag_no)
+    profile = get_device_profile(tag_no, project_id=project_id)
     if not profile.get("found"):
         return {"found": False, "tag_no": tag_no}
 
@@ -90,9 +90,9 @@ def _get_device_summary(tag_no: str) -> dict[str, Any]:
     }
 
 
-def _get_agent_evidence(query: str) -> dict[str, Any]:
+def _get_agent_evidence(query: str, project_id: str = "") -> dict[str, Any]:
     """Run agent query and return a flattened evidence summary."""
-    result = agent_query(query)
+    result = agent_query(query, project_id=project_id)
     evidence = {
         "tags": result.parsed.tags,
         "subsystems": result.parsed.subsystems,
@@ -134,6 +134,7 @@ def generate_acceptance_record(
     tag_no: str,
     site_data: SiteData | None = None,
     output_path: str | Path | None = None,
+    project_id: str = "",
 ) -> Path:
     """Generate an equipment installation acceptance record Excel.
 
@@ -141,12 +142,13 @@ def generate_acceptance_record(
         tag_no: Equipment tag number, e.g. CF0204ME01.
         site_data: Optional field measurements and inspector info.
         output_path: Where to save. Defaults to Temp/<tag>_acceptance_<date>.xlsx.
+        project_id: 工程隔离（P1）——证据检索只使用 平台级 + 本工程 资料。
 
     Returns:
         Path to the generated file.
     """
     site_data = site_data or SiteData()
-    dev = _get_device_summary(tag_no)
+    dev = _get_device_summary(tag_no, project_id)
 
     if output_path is None:
         from src.core.config import get_config
@@ -254,6 +256,7 @@ def generate_hoisting_plan(
     tag_no: str,
     site_data: SiteData | None = None,
     output_path: str | Path | None = None,
+    project_id: str = "",
 ) -> Path:
     """Generate a hoisting plan Word document.
 
@@ -261,12 +264,13 @@ def generate_hoisting_plan(
         tag_no: Equipment tag number.
         site_data: Crane selection and site constraints.
         output_path: Where to save. Defaults to Temp/<tag>_hoisting_<date>.docx.
+        project_id: 工程隔离（P1）——证据检索只使用 平台级 + 本工程 资料。
 
     Returns:
         Path to the generated file.
     """
     site_data = site_data or SiteData()
-    dev = _get_device_summary(tag_no)
+    dev = _get_device_summary(tag_no, project_id)
 
     if output_path is None:
         from src.core.config import get_config
@@ -340,7 +344,8 @@ def generate_hoisting_plan(
         doc.add_paragraph("待补充相关图纸依据。")
 
     # 5. Gaps
-    evidence = _get_agent_evidence(f"{dev.get('subsystem', '')} 子系统 {tag_no} 吊装方案")
+    evidence = _get_agent_evidence(
+        f"{dev.get('subsystem', '')} 子系统 {tag_no} 吊装方案", project_id=project_id)
     if evidence.get("gaps"):
         doc.add_heading("五、待补充资料", level=1)
         for g in evidence["gaps"]:
@@ -371,6 +376,7 @@ def generate_schedule(
     plan_type: str,
     items: list[dict[str, Any]] | None = None,
     output_path: str | Path | None = None,
+    project_id: str = "",
 ) -> Path:
     """Generate a weekly/monthly construction schedule Excel.
 
@@ -378,6 +384,7 @@ def generate_schedule(
         plan_type: "weekly" or "monthly".
         items: List of {"task", "subsystem", "start", "finish", "owner", "status"}.
         output_path: Where to save.
+        project_id: 工程隔离（P1）——保留透传（当前计划项由调用方提供）。
 
     Returns:
         Path to the generated file.
@@ -452,16 +459,39 @@ def generate_document(
     site_data: SiteData | None = None,
     items: list[dict[str, Any]] | None = None,
     output_path: str | Path | None = None,
+    project_id: str = "",
 ) -> Path:
-    """Dispatch to the right generator."""
+    """Dispatch to the right generator.
+
+    project_id: 工程隔离（P1）——生成时证据检索只使用 平台级 + 本工程 资料。
+    output_path: 传完整文件路径（自动建父目录）；或传目录（自动拼默认文件名）。
+    """
+    from datetime import datetime as _dt
+
+    if output_path is not None:
+        output_path = Path(output_path)
+        if output_path.suffix:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            # 目录语义：mkdir + 默认文件名（与各生成器默认命名一致）
+            output_path.mkdir(parents=True, exist_ok=True)
+            stamp = _dt.now().strftime("%Y%m%d_%H%M%S")
+            if doc_type == "acceptance":
+                fname = f"{tag_no}_acceptance_{stamp}.xlsx"
+            elif doc_type == "hoisting":
+                fname = f"{tag_no}_hoisting_{stamp}.docx"
+            else:
+                fname = f"{doc_type}_schedule_{stamp}.xlsx"
+            output_path = output_path / fname
+
     if doc_type == "acceptance":
         if not tag_no:
             raise ValueError("acceptance requires tag_no")
-        return generate_acceptance_record(tag_no, site_data=site_data, output_path=output_path)
+        return generate_acceptance_record(tag_no, site_data=site_data, output_path=output_path, project_id=project_id)
     if doc_type == "hoisting":
         if not tag_no:
             raise ValueError("hoisting requires tag_no")
-        return generate_hoisting_plan(tag_no, site_data=site_data, output_path=output_path)
+        return generate_hoisting_plan(tag_no, site_data=site_data, output_path=output_path, project_id=project_id)
     if doc_type in ("weekly", "monthly"):
-        return generate_schedule(doc_type, items=items, output_path=output_path)
+        return generate_schedule(doc_type, items=items, output_path=output_path, project_id=project_id)
     raise ValueError(f"Unknown doc_type: {doc_type}")

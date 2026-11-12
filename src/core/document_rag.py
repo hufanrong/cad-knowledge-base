@@ -104,11 +104,18 @@ def index_document_content(file_id: str) -> int:
     return n
 
 
-def query_documents(query: str, top_k: int = 5) -> list[dict]:
-    """Vector-search only document chunks."""
+def query_documents(query: str, top_k: int = 5, project_id: str = "") -> list[dict]:
+    """Vector-search only document chunks.
+
+    Args:
+        project_id: 工程隔离（P1）——非空时只返回 平台级 + 本工程 文档块；
+            空串 = 平台级查询不过滤。
+    """
     vi = VectorIndex()
-    return vi.query(query, top_k=top_k,
-                    where={"source_type": DOC_SOURCE_TYPE})
+    return vi.query_project(
+        query, top_k=top_k, project_id=project_id,
+        where={"source_type": DOC_SOURCE_TYPE},
+    )
 
 
 def delete_document_index(file_id: str) -> int:

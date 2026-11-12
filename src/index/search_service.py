@@ -55,6 +55,7 @@ class SearchService:
         drawing_id: str | None = None,
         entity_type: str | None = None,
         limit: int = 50,
+        project_id: str = "",
     ) -> list[SearchResult]:
         """Unified search across all indexes.
 
@@ -66,6 +67,8 @@ class SearchService:
             drawing_id: Filter by drawing.
             entity_type: Filter by entity type (e.g. "LINE").
             limit: Max results.
+            project_id: 工程隔离（P1）——非空时只返回 平台级(空/None) + 本工程 资料；
+                空串 = 平台级查询，不过滤。
 
         Returns:
             List of SearchResult (with provenance).
@@ -75,27 +78,31 @@ class SearchService:
         if search_type in ("all", "text", "attribute", "entity", "drawing"):
             results += self.search_fulltext(
                 query, search_type=search_type, layer=layer,
-                drawing_id=drawing_id, limit=limit,
+                drawing_id=drawing_id, limit=limit, project_id=project_id,
             )
 
         if search_type in ("all", "equipment"):
             results += self.search_equipment(
                 query, layer=layer, drawing_id=drawing_id, limit=limit,
+                project_id=project_id,
             )
 
         if search_type in ("all", "title_field"):
             results += self.search_title_fields(
                 query, layer=layer, drawing_id=drawing_id, limit=limit,
+                project_id=project_id,
             )
 
         if search_type in ("all", "dimension"):
             results += self.search_dimensions(
                 query, layer=layer, drawing_id=drawing_id, limit=limit,
+                project_id=project_id,
             )
 
         if search_type == "entity" and entity_type:
             results += self.search_by_entity_type(
                 entity_type, layer=layer, drawing_id=drawing_id, limit=limit,
+                project_id=project_id,
             )
 
         # Sort by score desc, then dedupe by (result_type, drawing_id, entity_id, content)
@@ -113,6 +120,36 @@ class SearchService:
 
         return deduped
 
+    # ── project isolation helpers (P1) ─────────────────────────────
+
+    @staticmethod
+    def _project_clause_sql(alias: str, params: dict, project_id: str) -> str:
+        """SQL 工程过滤片段：保留 平台级(空/None) + 本工程；project_id 空不过滤。"""
+        if not project_id:
+            return ""
+        params["pid"] = project_id
+        return (
+            f" AND ({alias}.project_id = :pid OR {alias}.project_id = '' "
+            f"OR {alias}.project_id IS NULL)"
+        )
+
+    @staticmethod
+    def _apply_project_orm(q, model, project_id: str):
+        """ORM query 工程过滤（join drawings -> files）；project_id 空不过滤。"""
+        if not project_id:
+            return q
+        from sqlalchemy import or_
+        from src.database.models import DrawingModel, FileModel
+        return (
+            q.join(DrawingModel, DrawingModel.drawing_id == model.drawing_id)
+            .join(FileModel, FileModel.drawing_id == DrawingModel.drawing_id)
+            .filter(or_(
+                FileModel.project_id == "",
+                FileModel.project_id == project_id,
+                FileModel.project_id.is_(None),
+            ))
+        )
+
     # ── Full-text search ────────────────────────────────────────────
 
     def search_fulltext(
@@ -122,6 +159,7 @@ class SearchService:
         layer: str | None = None,
         drawing_id: str | None = None,
         limit: int = 50,
+        project_id: str = "",
     ) -> list[SearchResult]:
         """Full-text search via FTS5.
 
@@ -136,18 +174,18 @@ class SearchService:
 
         if search_type in ("all", "text"):
             if q:
-                results += self._fts_texts(q, layer, drawing_id, limit)
+                results += self._fts_texts(q, layer, drawing_id, limit, project_id)
             elif layer or drawing_id:
                 # Structured query: list texts by layer/drawing
-                results += self._structured_texts(layer, drawing_id, limit)
+                results += self._structured_texts(layer, drawing_id, limit, project_id)
 
         if search_type in ("all", "attribute"):
             if q:
-                results += self._fts_attributes(q, drawing_id, limit)
+                results += self._fts_attributes(q, drawing_id, limit, project_id)
 
         if search_type in ("all", "drawing"):
             if q:
-                results += self._fts_drawings(q, limit)
+                results += self._fts_drawings(q, limit, project_id)
 
         return results
 
@@ -156,6 +194,7 @@ class SearchService:
         layer: str | None,
         drawing_id: str | None,
         limit: int,
+        project_id: str = "",
     ) -> list[SearchResult]:
         """Structured query: return texts by layer/drawing (no keyword)."""
         q = self.session.query(TextModel)
@@ -163,6 +202,7 @@ class SearchService:
             q = q.filter(TextModel.layer == layer)
         if drawing_id:
             q = q.filter(TextModel.drawing_id == drawing_id)
+        q = self._apply_project_orm(q, TextModel, project_id)
         rows = q.limit(limit).all()
 
         # Resolve file names
@@ -191,7 +231,8 @@ class SearchService:
             for t in rows
         ]
 
-    def _fts_texts(self, q: str, layer: str | None, drawing_id: str | None, limit: int) -> list[SearchResult]:
+    def _fts_texts(self, q: str, layer: str | None, drawing_id: str | None,
+                   limit: int, project_id: str = "") -> list[SearchResult]:
         try:
             sql = (
                 "SELECT f.text_content, f.drawing_id, f.entity_id, f.layer, f.layout, "
@@ -199,6 +240,7 @@ class SearchService:
                 "FROM texts_fts f "
                 "JOIN texts t ON t.entity_id = f.entity_id "
                 "JOIN drawings d ON d.drawing_id = f.drawing_id "
+                "LEFT JOIN files fl ON fl.drawing_id = d.drawing_id "
                 "WHERE texts_fts MATCH :q "
             )
             params: dict[str, Any] = {"q": q}
@@ -208,6 +250,7 @@ class SearchService:
             if drawing_id:
                 sql += " AND f.drawing_id = :did"
                 params["did"] = drawing_id
+            sql += self._project_clause_sql("fl", params, project_id)
             sql += " LIMIT :limit"
             params["limit"] = limit
 
@@ -230,17 +273,21 @@ class SearchService:
             logger.warning(f"FTS text 搜索失败: {e}")
             return []
 
-    def _fts_attributes(self, q: str, drawing_id: str | None, limit: int) -> list[SearchResult]:
+    def _fts_attributes(self, q: str, drawing_id: str | None,
+                        limit: int, project_id: str = "") -> list[SearchResult]:
         try:
             sql = (
                 "SELECT a.value, a.drawing_id, a.block_name, a.tag, d.file_name "
-                "FROM attributes_fts a JOIN drawings d ON d.drawing_id = a.drawing_id "
+                "FROM attributes_fts a "
+                "JOIN drawings d ON d.drawing_id = a.drawing_id "
+                "LEFT JOIN files fl ON fl.drawing_id = d.drawing_id "
                 "WHERE attributes_fts MATCH :q "
             )
             params: dict[str, Any] = {"q": q}
             if drawing_id:
                 sql += " AND a.drawing_id = :did"
                 params["did"] = drawing_id
+            sql += self._project_clause_sql("fl", params, project_id)
             sql += " LIMIT :limit"
             params["limit"] = limit
 
@@ -261,14 +308,19 @@ class SearchService:
             logger.warning(f"FTS attribute 搜索失败: {e}")
             return []
 
-    def _fts_drawings(self, q: str, limit: int) -> list[SearchResult]:
+    def _fts_drawings(self, q: str, limit: int, project_id: str = "") -> list[SearchResult]:
         try:
             sql = (
                 "SELECT d.file_name, d.drawing_id FROM drawings_fts f "
                 "JOIN drawings d ON d.drawing_id = f.drawing_id "
-                "WHERE drawings_fts MATCH :q LIMIT :limit"
+                "LEFT JOIN files fl ON fl.drawing_id = d.drawing_id "
+                "WHERE drawings_fts MATCH :q "
             )
-            rows = self.session.execute(text(sql), {"q": q, "limit": limit}).fetchall()
+            params: dict[str, Any] = {"q": q}
+            sql += self._project_clause_sql("fl", params, project_id)
+            sql += " LIMIT :limit"
+            params["limit"] = limit
+            rows = self.session.execute(text(sql), params).fetchall()
             return [
                 SearchResult(
                     result_type="drawing",
@@ -291,6 +343,7 @@ class SearchService:
         layer: str | None = None,
         drawing_id: str | None = None,
         limit: int = 50,
+        project_id: str = "",
     ) -> list[SearchResult]:
         """Search equipment by number/name."""
         q = self.session.query(EquipmentModel)
@@ -305,6 +358,7 @@ class SearchService:
             q = q.filter(EquipmentModel.layer == layer)
         if drawing_id:
             q = q.filter(EquipmentModel.drawing_id == drawing_id)
+        q = self._apply_project_orm(q, EquipmentModel, project_id)
         rows = q.limit(limit).all()
 
         results = []
@@ -340,6 +394,7 @@ class SearchService:
         layer: str | None = None,
         drawing_id: str | None = None,
         limit: int = 50,
+        project_id: str = "",
     ) -> list[SearchResult]:
         """Search title block fields by key or value."""
         q = self.session.query(TitleBlockFieldModel)
@@ -354,6 +409,7 @@ class SearchService:
             q = q.filter(TitleBlockFieldModel.layer == layer)
         if drawing_id:
             q = q.filter(TitleBlockFieldModel.drawing_id == drawing_id)
+        q = self._apply_project_orm(q, TitleBlockFieldModel, project_id)
         rows = q.limit(limit).all()
 
         results = []
@@ -377,6 +433,7 @@ class SearchService:
         layer: str | None = None,
         drawing_id: str | None = None,
         limit: int = 50,
+        project_id: str = "",
     ) -> list[SearchResult]:
         """Search dimensions by text content or measurement."""
         from src.database.models import DimensionModel
@@ -389,6 +446,7 @@ class SearchService:
             q = q.filter(DimensionModel.layer == layer)
         if drawing_id:
             q = q.filter(DimensionModel.drawing_id == drawing_id)
+        q = self._apply_project_orm(q, DimensionModel, project_id)
         rows = q.limit(limit).all()
 
         results = []
@@ -412,6 +470,7 @@ class SearchService:
         layer: str | None = None,
         drawing_id: str | None = None,
         limit: int = 50,
+        project_id: str = "",
     ) -> list[SearchResult]:
         """Search entities by type (structured query)."""
         q = self.session.query(EntityModel).filter(
@@ -421,6 +480,7 @@ class SearchService:
             q = q.filter(EntityModel.layer == layer)
         if drawing_id:
             q = q.filter(EntityModel.drawing_id == drawing_id)
+        q = self._apply_project_orm(q, EntityModel, project_id)
         rows = q.limit(limit).all()
 
         results = []

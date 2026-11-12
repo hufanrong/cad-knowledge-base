@@ -38,6 +38,48 @@ _chroma_available: bool | None = None
 _embedder: Any | None = None
 _embedder_backend: str | None = None
 
+# 工程映射缓存（drawing_id -> project_id / file_id -> project_id，懒加载）
+_proj_map: dict[str, str] | None = None
+
+
+def _load_proj_map() -> dict[str, str]:
+    """从 cadkb.db files 表加载 project_id 映射（key=drawing_id 或 file_id）。"""
+    global _proj_map
+    if _proj_map is not None:
+        return _proj_map
+    m: dict[str, str] = {}
+    try:
+        import sqlite3
+        from src.core.config import get_config
+        db_path = get_config().db_path
+        if Path(db_path).exists():
+            db = sqlite3.connect(str(db_path))
+            try:
+                c = db.cursor()
+                for r in c.execute(
+                    "SELECT drawing_id, project_id FROM files "
+                    "WHERE drawing_id IS NOT NULL AND drawing_id != ''"
+                ).fetchall():
+                    m[r[0]] = (r[1] or "").strip()
+                for r in c.execute(
+                    "SELECT file_id, project_id FROM files"
+                ).fetchall():
+                    m[r[0]] = (r[1] or "").strip()
+            finally:
+                db.close()
+    except Exception as e:
+        logger.warning(f"加载 project_id 映射失败（向量索引不带工程标签）: {e}")
+    _proj_map = m
+    return _proj_map
+
+
+def resolve_project_id(drawing_id: str, source_type: str = "") -> str:
+    """按 drawing_id/file_id 解析工程 id（查 files 表），未命中返回空（平台级）。"""
+    if not drawing_id:
+        return ""
+    # CAD 块用 drawing_id 映射；document 块 drawing_id 槽位存的就是 file_id，同样查
+    return _load_proj_map().get(drawing_id, "")
+
 
 def _check_chroma() -> bool:
     """Check whether chromadb is importable."""
@@ -193,6 +235,9 @@ class VectorIndex:
                                 "handle": c.handle or "",
                                 "layer": c.layer or "",
                                 "layout": c.layout or "",
+                                # 工程标签（P1）：按 files 表反查；未命中=平台级
+                                "project_id": resolve_project_id(
+                                    c.drawing_id, c.source_type),
                             }
                             for c in batch
                         ],
@@ -273,7 +318,7 @@ class VectorIndex:
         results = []
         for cid, v in self._vectors.items():
             c = self._chunks[cid]
-            if where and c.drawing_id != where.get("drawing_id"):
+            if not _match_where(c, where):
                 continue
             sim = _cosine(vec, v)
             results.append({
@@ -289,6 +334,49 @@ class VectorIndex:
         results.sort(key=lambda r: r["score"], reverse=True)
         return results[:top_k]
 
+    def query_project(
+        self,
+        query_text: str,
+        top_k: int = 10,
+        project_id: str = "",
+        where: dict | None = None,
+    ) -> list[dict]:
+        """工程隔离向量查询（P1）：平台级 + 本工程 两次等值查询合并。
+
+        规避 Chroma 1.5.9 bug：$in/$or 列表含空字符串 "" 时非空值全部丢失。
+        改为 project_id 等值查询两次（本工程 / 平台级空串）合并去重。
+        project_id 空 = 平台级查询（不隔离）。
+        """
+        if not project_id:
+            return self.query(query_text, top_k=top_k, where=where)
+        n = max(top_k * 2, 20)
+        w_proj = self._compose_where(where, "project_id", project_id)
+        w_plat = self._compose_where(where, "project_id", "")
+        # 工程级结果轻度加权（×1.15）：避免平台级大库挤占工程资料，同时不严重扭曲排序
+        proj_results = [
+            {**r, "score": round(r.get("score", 0) * 1.15, 4)}
+            for r in self.query(query_text, top_k=n, where=w_proj)
+        ]
+        plat_results = self.query(query_text, top_k=n, where=w_plat)
+        merged = proj_results + plat_results
+        seen: set[str] = set()
+        out: list[dict] = []
+        for r in merged:
+            cid = r.get("chunk_id")
+            if cid in seen:
+                continue
+            seen.add(cid)
+            out.append(r)
+        out.sort(key=lambda x: x.get("score", 0), reverse=True)
+        return out[:top_k]
+
+    @staticmethod
+    def _compose_where(where: dict | None, field: str, value) -> dict:
+        """把等值条件合并进既有 where（无 where 时直接等值）。"""
+        if not where:
+            return {field: value}
+        return {"$and": [where, {field: value}]}
+
     def count(self) -> int:
         self._ensure_collection()
         if self._collection is not None:
@@ -297,6 +385,32 @@ class VectorIndex:
             except Exception:
                 pass
         return len(self._chunks)
+
+
+def _match_where(chunk: "DocumentChunk", where: dict | None) -> bool:
+    """内存兜底检索的 where 匹配（支持 $and / 等值 / project_id $in）。
+
+    覆盖字段：drawing_id / source_type / project_id（后两者含反查）。
+    """
+    if not where:
+        return True
+    if "$and" in where:
+        return all(_match_where(chunk, w) for w in where["$and"])
+    for k, v in where.items():
+        if k == "drawing_id":
+            val = chunk.drawing_id
+        elif k == "source_type":
+            val = chunk.source_type
+        elif k == "project_id":
+            val = resolve_project_id(chunk.drawing_id, chunk.source_type)
+        else:
+            val = getattr(chunk, k, "") or ""
+        if isinstance(v, dict) and "$in" in v:
+            if val not in v["$in"]:
+                return False
+        elif val != v:
+            return False
+    return True
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
