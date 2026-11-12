@@ -75,3 +75,7 @@ htmlcov/
 
 # OCR 语言包（体积大，首次运行 setup 时按 README 下载）
 data/tessdata/*.traineddata
+
+# 编辑器/人工备份残留
+*.bak-*
+*.orig
