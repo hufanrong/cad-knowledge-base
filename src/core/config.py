@@ -93,6 +93,14 @@ class Config:
         )
         self.llm_max_tokens = self._yaml_get("llm.max_tokens", 800)
         self.llm_temperature = self._yaml_get("llm.temperature", 0.2)
+        # 请求超时（秒）。DeepSeek 等长回答 + 大上下文场景 30s 偏紧，且客户端无重试，
+        # 超时即失败；默认 60s，可用 CADKB_LLM_TIMEOUT 覆盖。
+        try:
+            self.llm_timeout = float(
+                os.environ.get("CADKB_LLM_TIMEOUT", self._yaml_get("llm.timeout", 60))
+            )
+        except (TypeError, ValueError):
+            self.llm_timeout = 60.0
 
         # Logging
         self.log_level = os.environ.get(

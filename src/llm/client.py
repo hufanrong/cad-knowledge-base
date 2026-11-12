@@ -53,7 +53,7 @@ class LLMClient:
         messages: list[dict],
         max_tokens: int | None = None,
         temperature: float | None = None,
-        timeout: float = 60.0,
+        timeout: float | None = None,
     ) -> str:
         """Send a chat completion request.
 
@@ -61,7 +61,9 @@ class LLMClient:
             messages: List of {"role": ..., "content": ...} dicts.
             max_tokens: Override max tokens.
             temperature: Override temperature.
-            timeout: Request timeout in seconds.
+            timeout: Request timeout in seconds. None = use config
+                (CADKB_LLM_TIMEOUT, default 60s). 大上下文长回答场景勿设过小，
+                客户端无重试，超时即失败。
 
         Returns:
             The assistant's text content.
@@ -85,7 +87,8 @@ class LLMClient:
         }
 
         try:
-            resp = httpx.post(url, headers=headers, json=payload, timeout=timeout)
+            req_timeout = timeout if timeout is not None else get_config().llm_timeout
+            resp = httpx.post(url, headers=headers, json=payload, timeout=req_timeout)
             resp.raise_for_status()
             data = resp.json()
             return data["choices"][0]["message"]["content"].strip()
