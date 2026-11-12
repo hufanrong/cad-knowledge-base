@@ -32,15 +32,17 @@ logger = setup_logger("cadkb.watch_entry")
 CAD_EXTENSIONS = {".dwg", ".dxf", ".dwt", ".dws"}
 IMPORTABLE = CAD_EXTENSIONS | DOC_EXTENSIONS
 
-# 程序源码扩展名黑名单：zip 解压/入口扫描时直接跳过，不导入
-# （2026-08-22 新增：历史曾因 zip 解压出大量 .mc/.cpp 源码拖垮监听队列）
-# （2026-08-29 新增 .bak/.dwl/.dwl2：CAD 备份与锁文件，ODA 转换会超时卡死并致监听进程崩溃）
+# 入口扫描跳过列表（2026-11-02 调整：移除 .txt——入口直接放置的 txt 视为资料导入，
+# 如微信群聊天记录导出；zip 解压内的 txt 仍跳过，见 SKIP_EXTENSIONS_ZIP）
 SKIP_EXTENSIONS = {
     ".mc", ".mct", ".cpp", ".h", ".hpp", ".c", ".cc", ".cs",
     ".py", ".js", ".ts", ".java", ".asm", ".s", ".lsp", ".scr",
-    ".txt", ".log", ".ini", ".cfg", ".json", ".xml",
+    ".log", ".ini", ".cfg", ".json", ".xml",
     ".bak", ".dwl", ".dwl2",
 }
+
+# zip 解压跳过列表（= 入口黑名单 + .txt：防压缩包内大量文本/源码文件拖垮队列）
+SKIP_EXTENSIONS_ZIP = SKIP_EXTENSIONS | {".txt"}
 
 # 监听入口目录：可用环境变量 CADKB_ENTRY_DIR 覆盖（每工程独立入口），默认桌面共享入口
 ENTRY = Path(os.environ.get("CADKB_ENTRY_DIR", r"D:\Users\hufanrong\Desktop\资料库入口"))
@@ -58,7 +60,8 @@ RECYCLE_DIR = Path(
 
 # 子目录隔离：这些目录不参与扫描
 # （2026-08-31 新增 _导入记录：季度导入记录表常住入口，不允许被当文件导入/归档）
-SKIP_DIRS = {"_已处理", "_失败", "_待处理", "_导入记录"}
+# （2026-11-02 新增 _微信群聊导出：群聊归档成果库，只读留存，禁止当待导入文件搬走）
+SKIP_DIRS = {"_已处理", "_失败", "_待处理", "_导入记录", "_微信群聊导出"}
 
 # 导入记录表（2026-08-31 新增，老板定案）：
 #   按季度一个文件，常住入口目录 _导入记录/ 下，不中转、不删除。
@@ -251,7 +254,7 @@ def extract_and_import(zip_path: Path, failed_dir: Path, depth: int = 0) -> dict
     for f in sorted(target.rglob("*")):
         if not f.is_file() or f.name.startswith("~$"):
             continue
-        if f.suffix.lower() in SKIP_EXTENSIONS:
+        if f.suffix.lower() in SKIP_EXTENSIONS_ZIP:
             continue
         try:
             if f.suffix.lower() == ".zip":
@@ -463,4 +466,16 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # pythonw 无控制台，未捕获异常的 traceback 会随 stderr 丢失导致"静默退出"，
+        # 这里兜底落盘便于诊断（2026-11-02 新增）
+        import traceback
+        crash_log = Path(__file__).resolve().parent / "watch_entry_crash.log"
+        try:
+            with open(crash_log, "a", encoding="utf-8") as f:
+                f.write(f"\n===== {datetime.now()} 进程异常退出 =====\n{traceback.format_exc()}\n")
+        except Exception:
+            pass
+        raise

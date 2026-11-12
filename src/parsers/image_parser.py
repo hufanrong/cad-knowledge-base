@@ -23,6 +23,26 @@ except ImportError:
     PIL_AVAILABLE = False
 
 
+def _configure_tesseract() -> None:
+    """定位本机 tesseract 引擎与语言包。
+
+    兜底场景：① tesseract 已装但不在 PATH（指定安装目录）；
+    ② 中文包 chi_sim 在本地目录（不动 Program Files，TESSDATA_PREFIX 指过去）。
+    """
+    import os
+    import shutil
+
+    import pytesseract
+
+    if not shutil.which("tesseract"):
+        exe = Path(r"C:/Program Files/Tesseract-OCR/tesseract.exe")
+        if exe.exists():
+            pytesseract.pytesseract.tesseract_cmd = str(exe)
+    tess_dir = Path(r"D:/WorkBuddy/work/envs/tessdata")
+    if (tess_dir / "chi_sim.traineddata").exists():
+        os.environ["TESSDATA_PREFIX"] = str(tess_dir)
+
+
 class ImageParser:
     """Parse image files (metadata + optional OCR)."""
 
@@ -75,6 +95,7 @@ class ImageParser:
         try:
             import pytesseract
 
+            _configure_tesseract()
             text = pytesseract.image_to_string(
                 str(path), lang="chi_sim+eng")
             text = text.strip()

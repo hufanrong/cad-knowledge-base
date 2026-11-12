@@ -1,9 +1,10 @@
-"""AI 问答页面 — RAG 检索 + 来源追溯 (Phase 10)."""
+"""AI 问答页面 — RAG 检索 + 来源追溯 (Phase 10)。"""
 
 from __future__ import annotations
 
 import pandas as pd
 
+from src.core.project_filter import list_projects
 from src.llm import get_llm_client
 from src.qa import QAService
 
@@ -20,6 +21,22 @@ def render(st):
             "可在 `config/default.yaml` 的 `llm.api_key` 配置。"
         )
 
+    # 工程范围选择（2026-08-30：共享库已更定义为马诺诺项目专属，无平台级资料）
+    try:
+        projects = list_projects()
+        options = {"": "全部资料"}
+        for p in projects:
+            options[p["project_id"]] = f"{p['name']}（{p['file_count']} 份）"
+        sel = st.selectbox(
+            "资料范围",
+            list(options.keys()),
+            format_func=lambda k: options[k],
+            help="资料库当前为马诺诺项目专属；选择工程后仅检索该工程资料，不串其他工程。",
+        )
+    except Exception as e:
+        st.caption(f"(工程列表加载失败，按平台级查询: {e})")
+        sel = ""
+
     query = st.text_area(
         "你的问题",
         placeholder="例如: 酸化窑的直径是多少？",
@@ -30,7 +47,7 @@ def render(st):
     if st.button("提问", type="primary", disabled=not query.strip()):
         with st.spinner("正在检索知识库..."):
             qa = QAService(llm_client=llm)
-            ans = qa.ask(query.strip(), top_k=top_k)
+            ans = qa.ask(query.strip(), top_k=top_k, project_id=sel)
 
         st.divider()
 
@@ -62,7 +79,7 @@ def render(st):
                     "类型": item.source.entity_type or item.data_tier,
                     "文件": src.file,
                     "图层": src.layer,
-                    "handle": src.handle,
+                    "handle": src.entity_handle,
                     "置信度": round(item.confidence, 3),
                     "定位": map_link,
                 })

@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from src.core.config import get_config
@@ -27,6 +28,11 @@ from src.index.search_service import SearchService
 from src.llm import get_llm_client
 from src.qa import QAService
 from src.utils.logger import setup_logger
+
+# 现场资料 / 工程实体 路由（第三、四阶段新增，工程隔离）
+from src.api.site_api import router as site_router
+from src.api.entity_api import router as entity_router
+from src.api.report_api import router as report_router
 
 logger = setup_logger("cadkb.api")
 
@@ -66,11 +72,28 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS（为未来 Web/PWA 前端预留，先放开；PWA 上线前补鉴权）
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 现场资料 / 工程实体 路由注册
+app.include_router(site_router)
+app.include_router(entity_router)
+app.include_router(report_router)
+
 
 class QueryRequest(BaseModel):
     """Request body for POST /api/query."""
     query: str = Field(..., description="用户问题")
     top_k: int = Field(8, ge=1, le=50, description="检索结果数")
+    project_id: str = Field("", description="工程 id（空=平台级通用查询；非空=该工程 + 平台级双层检索）")
+    include_chat: bool = Field(True, description="是否同时检索现场群聊档案（第二检索源，独立库，带出处标注）")
+    chat_top_k: int = Field(6, ge=0, le=20, description="群聊命中条数上限")
 
 
 class QueryResponse(BaseModel):
@@ -84,6 +107,8 @@ class QueryResponse(BaseModel):
     traceable_count: int
     untraceable_count: int
     context: list[dict]  # provenance-carrying context items
+    chat_used: bool = False          # 是否用到了群聊证据
+    chat_items: list[dict] = []      # 群聊出处（group/date/time/sender/content）
 
 
 @app.get("/api/health")
@@ -214,10 +239,17 @@ def api_rag(q: str = Query(..., description="检索问题"), top_k: int = Query(
 
 @app.post("/api/query")
 def api_query(req: QueryRequest):
-    """AI QA with source traceability."""
+    """AI QA with source traceability (P1: project-scoped double-layer retrieval).
+
+    双源检索（2026-11-11）：
+      - 源1 受控技术文件（cadkb.db：图纸/设备表/台账/厂家资料）
+      - 源2 现场群聊档案（chat_archive.db，独立库，只读；include_chat 开关，默认开）
+    群聊结果在回答中以「据群聊」标注，并在 chat_items 里带出处。
+    """
     init_database()
     qa = QAService(llm_client=get_llm_client())
-    ans = qa.ask(req.query, top_k=req.top_k)
+    ans = qa.ask(req.query, top_k=req.top_k, project_id=req.project_id,
+                 include_chat=req.include_chat, chat_top_k=req.chat_top_k)
 
     return QueryResponse(
         query=ans.query,
@@ -237,13 +269,38 @@ def api_query(req: QueryRequest):
             }
             for c in ans.context_items
         ],
+        chat_used=ans.chat_used,
+        chat_items=ans.chat_items,
     )
+
+
+@app.get("/api/site-chat/search")
+def api_site_chat_search(
+    q: str = Query(..., description="检索关键词/问题"),
+    top_k: int = Query(10, ge=1, le=50),
+    group: str = Query("", description="群名称（模糊，可空）"),
+    date_from: str = Query("", description="起始日期 YYYY-MM-DD，可空"),
+    date_to: str = Query("", description="截止日期 YYYY-MM-DD，可空"),
+):
+    """现场群聊档案直接检索（独立库，只读，供门户/脚本使用）。"""
+    from src.core.site_chat_search import search_site_chat, stats as chat_stats
+
+    if not q.strip():
+        raise HTTPException(status_code=400, detail="请输入检索关键词")
+    return {
+        "query": q,
+        "total_available": chat_stats().get("messages", 0),
+        "items": search_site_chat(q, top_k=top_k, group=group or None,
+                                  date_from=date_from or None,
+                                  date_to=date_to or None),
+    }
 
 
 class AgentQueryRequest(BaseModel):
     """Request body for POST /api/agent/query."""
     query: str = Field(..., description="自然语言问题，例如：0203 子系统 CF0204ME01 吊装方案")
     top_k: int = Field(8, ge=1, le=50, description="检索结果数量")
+    project_id: str = Field("", description="工程 id（空=平台级通用查询；非空=该工程 + 平台级双层检索）")
 
 
 @app.post("/api/agent/query")
@@ -253,7 +310,7 @@ def api_agent_query(req: AgentQueryRequest):
     from src.core.agent_query import agent_query, to_dict
 
     init_database()
-    result = agent_query(req.query, top_k=req.top_k)
+    result = agent_query(req.query, top_k=req.top_k, project_id=req.project_id)
     return to_dict(result)
 
 
@@ -263,6 +320,8 @@ class GenerateRequest(BaseModel):
     tag_no: str | None = Field(None, description="设备位号，acceptance/hoisting 必填")
     site_data: dict[str, Any] = Field(default_factory=dict, description="现场数据/约束（JSON 对象）")
     items: list[dict[str, Any]] = Field(default_factory=list, description="weekly/monthly 计划项")
+    project_id: str = Field("", description="工程 id（空=平台级通用查询；非空=该工程 + 平台级双层检索）")
+    output_path: str = Field("", description="输出目录（默认 CAD-KB 输出区；portal 传工程 04_输出/<日期>）")
 
 
 @app.post("/api/generate")
@@ -289,6 +348,8 @@ def api_generate(req: GenerateRequest):
             tag_no=req.tag_no,
             site_data=site,
             items=req.items,
+            output_path=req.output_path or None,
+            project_id=req.project_id,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -406,6 +467,7 @@ def api_search_all(
     q: str = Query(..., description="统一搜索关键词"),
     source_type: str = Query("", description="过滤类型"),
     limit: int = Query(30, ge=1, le=100),
+    project_id: str = Query("", description="工程 id（空=平台级通用查询；非空=该工程 + 平台级双层检索）"),
 ):
     """跨格式统一搜索（CAD + 文档 + 文件元数据）。"""
     init_database()
@@ -414,6 +476,7 @@ def api_search_all(
     return search_all(
         q, limit=limit,
         source_types=[source_type] if source_type else None,
+        project_id=project_id,
     )
 
 
@@ -467,11 +530,11 @@ def api_devices(
 
 
 @app.get("/api/devices/{tag_no}/profile")
-def api_device_profile(tag_no: str):
+def api_device_profile(tag_no: str, project_id: str = Query("", description="工程 id（空=平台级；非空=该工程+平台级双层）")):
     """按位号返回完整设备档案（跨图位置、箱单、文档）。"""
     from src.core.device_profile import get_device_profile
 
-    profile = get_device_profile(tag_no)
+    profile = get_device_profile(tag_no, project_id=project_id)
     if not profile["found"]:
         raise HTTPException(status_code=404, detail=f"未找到位号: {tag_no}")
     return profile
