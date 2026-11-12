@@ -14,6 +14,7 @@ from typing import Any
 
 from sqlalchemy import text
 
+from src.core.fts_query import build_match
 from src.database.connection import get_session
 from src.database.models import (
     DrawingModel,
@@ -233,6 +234,9 @@ class SearchService:
 
     def _fts_texts(self, q: str, layer: str | None, drawing_id: str | None,
                    limit: int, project_id: str = "") -> list[SearchResult]:
+        match = build_match(q)
+        if not match:
+            return []  # 无强 token（如「9-2」），直接跳过，避免语法错与噪声
         try:
             sql = (
                 "SELECT f.text_content, f.drawing_id, f.entity_id, f.layer, f.layout, "
@@ -243,7 +247,7 @@ class SearchService:
                 "LEFT JOIN files fl ON fl.drawing_id = d.drawing_id "
                 "WHERE texts_fts MATCH :q "
             )
-            params: dict[str, Any] = {"q": q}
+            params: dict[str, Any] = {"q": match}
             if layer:
                 sql += " AND f.layer = :layer"
                 params["layer"] = layer
@@ -275,6 +279,9 @@ class SearchService:
 
     def _fts_attributes(self, q: str, drawing_id: str | None,
                         limit: int, project_id: str = "") -> list[SearchResult]:
+        match = build_match(q)
+        if not match:
+            return []
         try:
             sql = (
                 "SELECT a.value, a.drawing_id, a.block_name, a.tag, d.file_name "
@@ -283,7 +290,7 @@ class SearchService:
                 "LEFT JOIN files fl ON fl.drawing_id = d.drawing_id "
                 "WHERE attributes_fts MATCH :q "
             )
-            params: dict[str, Any] = {"q": q}
+            params: dict[str, Any] = {"q": match}
             if drawing_id:
                 sql += " AND a.drawing_id = :did"
                 params["did"] = drawing_id
@@ -309,6 +316,9 @@ class SearchService:
             return []
 
     def _fts_drawings(self, q: str, limit: int, project_id: str = "") -> list[SearchResult]:
+        match = build_match(q)
+        if not match:
+            return []
         try:
             sql = (
                 "SELECT d.file_name, d.drawing_id FROM drawings_fts f "
@@ -316,7 +326,7 @@ class SearchService:
                 "LEFT JOIN files fl ON fl.drawing_id = d.drawing_id "
                 "WHERE drawings_fts MATCH :q "
             )
-            params: dict[str, Any] = {"q": q}
+            params: dict[str, Any] = {"q": match}
             sql += self._project_clause_sql("fl", params, project_id)
             sql += " LIMIT :limit"
             params["limit"] = limit

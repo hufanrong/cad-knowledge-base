@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from src.core.fts_query import build_match
 from src.database.connection import get_session
 from src.database.models import (
     BlockAttributeModel,
@@ -805,12 +806,15 @@ class DrawingRepository:
 
     def search_fulltext(self, query_str: str, limit: int = 50) -> list[dict]:
         """Full-text search across texts."""
+        match = build_match(query_str)
+        if not match:
+            return []
         try:
             results = self.session.execute(text(
                 "SELECT text_content, drawing_id, entity_id, layer, layout "
                 "FROM texts_fts WHERE text_content MATCH :q "
                 "LIMIT :limit"
-            ), {"q": query_str, "limit": limit}).fetchall()
+            ), {"q": match, "limit": limit}).fetchall()
 
             return [
                 {

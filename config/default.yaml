@@ -19,7 +19,11 @@ storage:
   # 预览
   thumbnails_dir: D:/WorkBuddy/work/data/knowledge_base/Preview
   # 向量库（VectorDB）
-  embeddings_dir: D:/WorkBuddy/work/data/knowledge_base/VectorDB
+  # 2026-11-12：旧 VectorDB/ 的 HNSW 索引文件为旧格式/头部损坏，chromadb 1.5.9
+  # 加载时按坏头算出天文数字的 max_elements → 内存分配失败、进程被 abort
+  # （日志：memory allocation of 33554432 bytes failed）。旧目录原样保留备查，
+  # 新库切到 VectorDB_v2/，由 rebuild-index --embeddings 重建。
+  embeddings_dir: D:/WorkBuddy/work/data/knowledge_base/VectorDB_v2
   # 搜索索引
   indexes_dir: D:/WorkBuddy/work/data/knowledge_base/Index
   # 日志

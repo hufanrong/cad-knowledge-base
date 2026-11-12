@@ -14,6 +14,7 @@ import json
 
 from sqlalchemy import text
 
+from src.core.fts_query import build_match
 from src.database.connection import get_session
 from src.database.models import (
     DocumentContentModel,
@@ -193,6 +194,9 @@ def get_project_files(project_id: str, limit: int = 50) -> list[dict]:
 
 def _fts_documents(session, q: str, limit: int,
                    project_id: str = "") -> list[dict]:
+    match = build_match(q)
+    if not match:
+        return []
     try:
         sql = """
                 SELECT d.file_id, d.title, d.content, d.source_type,
@@ -206,7 +210,7 @@ def _fts_documents(session, q: str, limit: int,
                 LEFT JOIN files f ON d.file_id = f.file_id
                 WHERE documents_fts MATCH :q
             """
-        params: dict = {"q": q, "lim": limit}
+        params: dict = {"q": match, "lim": limit}
         if project_id:
             sql += (" AND (f.project_id = :pid OR f.project_id = '' "
                     "OR f.project_id IS NULL)")
@@ -241,6 +245,9 @@ def _fts_documents(session, q: str, limit: int,
 def _fts_cad(session, q: str, limit: int,
              project_id: str = "") -> list[dict]:
     out = []
+    match = build_match(q)
+    if not match:
+        return out
     try:
         sql = """
                 SELECT t.text_content, t.drawing_id,
@@ -250,7 +257,7 @@ def _fts_cad(session, q: str, limit: int,
                 JOIN drawings d ON t.drawing_id = d.drawing_id
                 WHERE texts_fts MATCH :q
             """
-        params: dict = {"q": q, "lim": limit}
+        params: dict = {"q": match, "lim": limit}
         if project_id:
             sql += (" AND EXISTS (SELECT 1 FROM files fl "
                     "WHERE fl.drawing_id = d.drawing_id "
